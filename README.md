@@ -26,12 +26,23 @@ The API is available at `http://127.0.0.1:8000`; interactive docs are at `/docs`
 With the API running, serve the landing page from a second terminal:
 
 ```bash
-./.venv/bin/python -m http.server 5500 --bind 127.0.0.1
+./.venv/bin/python -m http.server 5500 --bind 127.0.0.1 --directory frontend
 ```
 
 Open `http://127.0.0.1:5500/`. The page posts the selected MP4/MOV as the `video` field to `/analyze`.
-For a deployed site, set `window.BBALLMOTIONS_API_URL` to the API base URL before the page script,
-and set the backend's `BASKETBALL_CORS_ORIGINS` to the website origin(s).
+
+## Deploy the Website to Netlify
+
+The repository includes `netlify.toml`, which publishes only `frontend/`; the backend, model files,
+videos, and analysis datasets remain outside the public site. Connect the repository in Netlify and
+use the default settings from that file (no build command). Add the `.tech` domain in Netlify's
+Domain settings and follow the DNS instructions shown there.
+
+The FastAPI service is separate from the static Netlify site. Deploy it to a host that can run the
+backend and local model, then set `window.BBALLMOTIONS_API_URL` in `frontend/index.html` to that
+public HTTPS API base URL. Configure the backend's `BASKETBALL_CORS_ORIGINS` with both the apex
+domain and `www` origin if both are used. The default API URL in the page is only for the prior
+Render deployment; local development selects `http://127.0.0.1:8000` automatically.
 
 Coaching feedback is generated locally with MLX on Apple Silicon. The first analysis downloads
 the default 4-bit Hugging Face model (about 2.3 GB); later runs use the local cache. Set
