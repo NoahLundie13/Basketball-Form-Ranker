@@ -1,4 +1,5 @@
-import os, sys, math
+import os, glob, math
+from pathlib import Path
 import cv2
 import numpy as np
 import pandas as pd
@@ -7,16 +8,17 @@ from mediapipe.tasks import python as mp_python
 from mediapipe.tasks.python import vision
 import matplotlib.pyplot as plt
 
-# ---- settings (keep these the same as track_v3.py) ----
-REF_DIR = "output_v3"
-POSE_MODEL = "pose_landmarker_lite.task"
-HAND_MODEL = "hand_landmarker.task"
+ROOT_DIR = Path(__file__).resolve().parents[1]
+VIDEO_DIR = ROOT_DIR / "data" / "input" / "reference_videos" / "zaid"
+OUT_DIR = ROOT_DIR / "data" / "processed" / "v3"
+POSE_MODEL = str(ROOT_DIR / "models" / "pose_landmarker_lite.task")
+HAND_MODEL = str(ROOT_DIR / "models" / "hand_landmarker.task")
 USE_HANDS = os.path.exists(HAND_MODEL)
 SHOOTING_ARM = "r"
 N_POINTS = 100
-MIN_VIS = 0.5
+MIN_VIS = 0.0
 
-VIDEO = sys.argv[1] if len(sys.argv) > 1 else "testvideos/test1.mp4"
+os.makedirs(OUT_DIR, exist_ok=True)
 
 SIDES = {
     "l": dict(shoulder=11, elbow=13, wrist=15, index=19, hip=23, knee=25, ankle=27),
@@ -24,6 +26,16 @@ SIDES = {
 }
 GUIDE_ARM = "l" if SHOOTING_ARM == "r" else "r"
 ARMS = {"shoot": SIDES[SHOOTING_ARM], "guide": SIDES[GUIDE_ARM]}
+
+REQUIRED_COLS = []
+for arm in ARMS:
+    REQUIRED_COLS += [f"{arm}_elbow_angle", f"{arm}_wrist_angle", f"{arm}_shoulder_angle"]
+REQUIRED_COLS += ["hip_height", "torso_lean", "nose_x_offset", "nose_y_offset"]
+LEG_COLS = []
+for side in ARMS:
+    LEG_COLS += [f"{side}_knee_angle", f"{side}_thigh_angle"]
+HAND_COLS = ["finger_spread", "index_extension"]
+ALL_COLS = REQUIRED_COLS + LEG_COLS + (HAND_COLS if USE_HANDS else [])
 
 
 def angle(a, b, c):
@@ -57,11 +69,13 @@ def process_video(path):
             mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
             ts = int(i * 1000 / fps)
             res = pose_lm.detect_for_video(mp_img, ts)
-            row = {}
+            row = {"frame": i, "time_s": i / fps}
+
             if res.pose_landmarks:
                 lms = res.pose_landmarks[0]
                 P = lambda idx: np.array([lms[idx].x * w, lms[idx].y * h])
                 vis = lambda idx: (lms[idx].visibility or 0)
+
                 sh_mid = (P(11) + P(12)) / 2
                 hip_mid = (P(23) + P(24)) / 2
                 torso = np.linalg.norm(sh_mid - hip_mid) + 1e-9
@@ -71,15 +85,18 @@ def process_video(path):
                     row[f"{arm}_elbow_angle"] = angle(s, e, wr)
                     row[f"{arm}_wrist_angle"] = angle(e, wr, idx)
                     row[f"{arm}_shoulder_angle"] = angle(hp, s, e)
+
+                    # legs (only if the points are actually visible)
                     if vis(ix["hip"]) > MIN_VIS and vis(ix["knee"]) > MIN_VIS:
                         v = P(ix["knee"]) - P(ix["hip"])
-                        row[f"{arm}_thigh_angle"] = math.degrees(math.atan2(abs(v[0]), v[1]))
+                        row[f"{arm}_thigh_angle"] = math.degrees(math.atan2(abs(v[0]), v[1]))  # 0 = vertical
                         if vis(ix["ankle"]) > MIN_VIS:
                             row[f"{arm}_knee_angle"] = angle(P(ix["hip"]), P(ix["knee"]), P(ix["ankle"]))
 
                 row["hip_y_raw"] = hip_mid[1] / torso
                 v = sh_mid - hip_mid
                 row["torso_lean"] = math.degrees(math.atan2(v[0], -v[1]))
+
                 nose = P(0)
                 row["nose_x_offset"] = (nose[0] - sh_mid[0]) / torso
                 row["nose_y_offset"] = (sh_mid[1] - nose[1]) / torso
@@ -121,54 +138,53 @@ def normalize(df, cols):
     return pd.DataFrame(out)
 
 
-# ---- load Shai's reference ----
-avg = pd.read_csv(os.path.join(REF_DIR, "average_shot.csv"), index_col="pct_of_shot")
-shots = pd.read_csv(os.path.join(REF_DIR, "all_shots_normalized.csv"))
-std = shots.groupby("pct_of_shot")[list(avg.columns)].std()
+video_files = sorted(glob.glob(os.path.join(VIDEO_DIR, "*.mp4")) +
+                     glob.glob(os.path.join(VIDEO_DIR, "*.mov")))
+print(f"Found {len(video_files)} videos in '{VIDEO_DIR}'")
+print("Finger tracking:", "ON" if USE_HANDS else "OFF (hand_landmarker.task not found)")
 
-# ---- process the new video ----
-if not os.path.exists(VIDEO):
-    raise SystemExit(f"Video not found: {VIDEO}")
-print("Scoring", VIDEO)
-new = normalize(process_video(VIDEO), list(avg.columns))
+all_shots = []
+for path in video_files:
+    name = os.path.splitext(os.path.basename(path))[0]
+    print("Processing", name)
+    df = process_video(path)
+    df.to_csv(os.path.join(OUT_DIR, f"{name}_raw.csv"), index=False)
+    if any(c not in df.columns or df[c].notna().sum() < 10 for c in REQUIRED_COLS):
+        print("  skipped (pose barely detected)")
+        continue
+    leg_ok = [c for c in LEG_COLS if c in df.columns and df[c].notna().sum() >= 10]
+    if len(leg_ok) < len(LEG_COLS):
+        print("  note: legs not clearly visible in this clip (leg graphs may be partial)")
+    norm = normalize(df, ALL_COLS)
+    norm["video"] = name
+    norm["pct_of_shot"] = np.arange(N_POINTS)
+    all_shots.append(norm)
 
-# ---- compare ----
-scores = {}
-for c in avg.columns:
-    ref_ok = avg[c].notna().all() and std[c].notna().all()
-    if not ref_ok or new[c].isna().any():
-        continue  # skip metrics missing in Shai's data or in the new clip
-    sigma = np.maximum(std[c].values, 0.25 * np.nanmean(std[c].values) + 1e-6)
-    z = np.abs(new[c].values - avg[c].values) / sigma
-    scores[c] = float(np.mean(np.exp(-0.5 * (z / 2) ** 2)) * 100)
+if not all_shots:
+    raise SystemExit("No videos were processed. Check the folder and model files.")
 
-if not scores:
-    raise SystemExit("No metrics could be compared. Is the person visible in the video?")
+combined = pd.concat(all_shots)
+combined.to_csv(os.path.join(OUT_DIR, "all_shots_normalized.csv"), index=False)
 
-overall = float(np.mean(list(scores.values())))
-print(f"\nFORM SIMILARITY TO SHAI: {overall:.0f} / 100\n")
-print("Per-metric scores (best to worst):")
-for c, s in sorted(scores.items(), key=lambda x: -x[1]):
-    print(f"  {c:22s} {s:5.0f}")
-skipped = [c for c in avg.columns if c not in scores]
-if skipped:
-    print("\nNot scored (no reliable data):", ", ".join(skipped))
+avg = combined.groupby("pct_of_shot")[ALL_COLS].mean()
+std = combined.groupby("pct_of_shot")[ALL_COLS].std()
+avg.to_csv(os.path.join(OUT_DIR, "average_shot.csv"))
 
-# ---- plot ----
-cols = list(scores)
 ncols = 2
-nrows = math.ceil(len(cols) / ncols)
+nrows = math.ceil(len(ALL_COLS) / ncols)
 fig, axes = plt.subplots(nrows, ncols, figsize=(13, 3 * nrows), sharex=True)
-axes = np.array(axes).flatten()
-for ax, c in zip(axes, cols):
-    ax.plot(avg.index, avg[c], color="C0", linewidth=2, label="Shai average")
+axes = axes.flatten()
+for ax, c in zip(axes, ALL_COLS):
+    for _, g in combined.groupby("video"):
+        ax.plot(g["pct_of_shot"], g[c], color="gray", alpha=0.25)
+    ax.plot(avg.index, avg[c], color="C0", linewidth=2.5)
     ax.fill_between(avg.index, avg[c] - std[c], avg[c] + std[c], color="C0", alpha=0.2)
-    ax.plot(range(N_POINTS), new[c], color="red", linewidth=2, label="This shot")
-    ax.set_title(f"{c} (score {scores[c]:.0f})", fontsize=10)
-axes[0].legend()
-for ax in axes[len(cols):]:
+    ax.set_title(c, fontsize=10)
+for ax in axes[len(ALL_COLS):]:
     ax.axis("off")
-plt.suptitle(f"Overall similarity: {overall:.0f}/100", fontsize=14)
+for ax in axes[-ncols:]:
+    ax.set_xlabel("% of shot")
 plt.tight_layout()
-plt.savefig("score_result.png", dpi=150)
+plt.savefig(os.path.join(OUT_DIR, "average_shot.png"), dpi=150)
 plt.show()
+print(f"Done. Check {OUT_DIR}.")

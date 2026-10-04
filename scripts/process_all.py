@@ -1,4 +1,5 @@
 import os, glob
+from pathlib import Path
 import cv2
 import numpy as np
 import pandas as pd
@@ -7,9 +8,10 @@ from mediapipe.tasks import python as mp_python
 from mediapipe.tasks.python import vision
 import matplotlib.pyplot as plt
 
-VIDEO_DIR = "."
-OUT_DIR = "output"
-MODEL_PATH = "pose_landmarker_lite.task"
+ROOT_DIR = Path(__file__).resolve().parents[1]
+VIDEO_DIR = ROOT_DIR / "data" / "input" / "reference_videos" / "zaid"
+OUT_DIR = ROOT_DIR / "data" / "processed" / "v1"
+MODEL_PATH = str(ROOT_DIR / "models" / "pose_landmarker_lite.task")
 SHOOTING_ARM = "r"
 N_POINTS = 100
 

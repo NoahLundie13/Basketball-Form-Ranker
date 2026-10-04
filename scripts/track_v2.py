@@ -1,4 +1,5 @@
 import os, glob, math
+from pathlib import Path
 import cv2
 import numpy as np
 import pandas as pd
@@ -7,10 +8,11 @@ from mediapipe.tasks import python as mp_python
 from mediapipe.tasks.python import vision
 import matplotlib.pyplot as plt
 
-VIDEO_DIR = "."
-OUT_DIR = "output_v2"
-POSE_MODEL = "pose_landmarker_lite.task"
-HAND_MODEL = "hand_landmarker.task"
+ROOT_DIR = Path(__file__).resolve().parents[1]
+VIDEO_DIR = ROOT_DIR / "data" / "input" / "reference_videos" / "zaid"
+OUT_DIR = ROOT_DIR / "data" / "processed" / "v2"
+POSE_MODEL = str(ROOT_DIR / "models" / "pose_landmarker_lite.task")
+HAND_MODEL = str(ROOT_DIR / "models" / "hand_landmarker.task")
 USE_HANDS = os.path.exists(HAND_MODEL)   # turns off automatically if the file is missing
 SHOOTING_ARM = "r"                        # "r" or "l"
 N_POINTS = 100
@@ -176,4 +178,4 @@ for ax in axes[-ncols:]:
 plt.tight_layout()
 plt.savefig(os.path.join(OUT_DIR, "average_shot.png"), dpi=150)
 plt.show()
-print("Done. Check the output_v2 folder.")
+print(f"Done. Check {OUT_DIR}.")
